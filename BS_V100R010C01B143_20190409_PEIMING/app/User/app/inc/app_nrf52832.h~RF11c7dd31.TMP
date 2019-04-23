@@ -1,0 +1,25 @@
+#ifndef __APP_NRF52832_H
+#define __APP_NRF52832_H
+
+#include "stm32f10x.h"		
+
+#define NRF_PORT             COM3	       //控制器与nrf通信端口
+#define BRACELET_RECORD_LEN  17          //每条需要保存的手环数据的长度
+
+/*********************************nrf协议命令********************************************/
+#define GAPLISTENING                    0x40        //打开监听
+#define GAPDATA                         0x41        //广播数据
+#define CHANGE_TARGET                   0x42        //改变连接目标
+#define SEND_MESSAGE                    0x43        //发送消息
+#define GET_MOTION_PARAMETER            0x44        //获取运动数据
+#define ADVERTISING_START								0x46				//开始广播，准备升级
+
+void app_nrf_DealData(void);
+void app_nrf_SendAllRestGapData(void);
+void app_nrf_GapInfoGet(uint8_t *addr);
+ErrorStatus app_nrf_GetMotionParameter(uint8_t *adrr);
+ErrorStatus app_nrf_LinkTargetBracelet(uint8_t *adrr,uint8_t *MAC);
+ErrorStatus app_nrf_LeaveMessage(uint8_t *adrr,uint8_t *message,uint16_t len);
+
+#endif
+

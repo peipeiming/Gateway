@@ -1,0 +1,16 @@
+#ifndef __MQTT_H
+#define __MQTT_H
+
+
+#define CLICENTID   "201802111744"
+#define SERVERPORT  1883
+#define CLICENTPORT 6000
+
+int mqtt_publish(char *pTopic,char *pMessage,int msglen);
+int mqtt_subscrib(char *pTopic);
+int mqtt_connect(char *name,char *word);
+int Heartbeat(void);
+
+
+#endif 
+

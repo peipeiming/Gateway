@@ -1,0 +1,495 @@
+#include "includes.h"
+
+/*断网重连*/
+static void connect_again(void)
+{
+	int rc = 0;
+	uint8_t temp=0;
+
+	xTimerStop(xPingTimers, 100);
+	bsp_LedOff(2); //关闭网络指示灯
+  
+	#if APP_DEBUG
+	printf("disconnecting.......\r\n");
+  #endif
+	
+	while(temp == PHY_LINK_OFF)		/*循环检测网络*/
+	{
+		ctlwizchip(CW_GET_PHYLINK, (void*)&temp); 
+		#if APP_DEBUG
+		printf("Unknown PHY Link stauts.\r\n");
+		#endif
+		xEventGroupSetBits(xCreatedEventGroup, TASK_BIT_0);
+		vTaskDelay(1000);
+	}
+	
+	while(rc!=DHCP_IP_LEASED) /*有网*/	
+	{
+		#if APP_DEBUG
+		printf("DHCP_run.\r\n");
+		#endif
+		rc=DHCP_run();			
+	}
+
+	transport_close();  //关闭端口
+	#if APP_DEBUG
+	printf("close port.......\r\n");
+	#endif 
+
+	mqtt_connect(sysCfg.parameter.server_ip, sysCfg.parameter.server_port, (char *)sysCfg.parameter.server_user , (char *)sysCfg.parameter.server_pass ); //连接服务器	
+	vTaskDelay(500);   
+	app_palt_SubscribandPublishMyTopic();  /*订阅需要订阅的主题*/
+	xTimerStart(xPingTimers, 100);
+}
+
+/*********************************************************************************************************
+*	函 数 名: main
+*	功能说明: 标准c程序入口。
+*	形    参：无
+*	返 回 值: 无
+*********************************************************************************************************
+*/
+int main(void)
+{
+	/* 
+	  在启动调度前，为了防止初始化STM32外设时有中断服务程序执行，这里禁止全局中断(除了NMI和HardFault)。
+	  这样做的好处是：
+	  1. 防止执行的中断服务程序中有FreeRTOS的API函数。
+	  2. 保证系统正常启动，不受别的中断影响。
+	  3. 关于是否关闭全局中断，大家根据自己的实际情况设置即可。
+	  在移植文件port.c中的函数prvStartFirstTask中会重新开启全局中断。通过指令cpsie i开启，__set_PRIMASK(1)
+	  和cpsie i是等效的。
+     */
+	__set_PRIMASK(1); 	
+
+  bsp_Init();  								/*硬件初始化 */
+	app_flash_LoadSysConfig();  /*读取配置参数*/
+	net_init();                 /*网络初始化*/
+	AppTaskCreate();            /*创建任务 */
+	AppObjCreate();      				/*创建任务通信机制 */
+  vTaskStartScheduler();      /*启动调度，开始执行任务*/
+	/* 
+	  如果系统正常启动是不会运行到这里的，运行到这里极有可能是用于定时器任务或者空闲任务的
+	  heap空间不足造成创建失败，此要加大FreeRTOSConfig.h文件中定义的heap大小：
+	*/
+	while(1);
+}
+
+/*
+*********************************************************************************************************
+*	函 数 名: vTaskCheckNet
+*	功能说明: 检查网络连接	
+*	形    参: pvParameters 是在创建该任务时传递的形参
+*	返 回 值: 无
+* 优 先 级: 1  
+*********************************************************************************************************
+*/
+static void vTaskCheckNet(void *pvParameters)
+{
+	uint8_t tmp=0;
+
+	while(1)
+	{
+		/*检测网络状态*/
+		ctlwizchip(CW_GET_PHYLINK, (void*)&tmp);		
+		if(tmp==PHY_LINK_ON)//有网
+		{ 
+			app_plat_NetLedToggle(void);				
+			do_ntp_client();	
+			
+		  /*发送事件标志，表示任务正常运行 */
+		  xEventGroupSetBits(xCreatedEventGroup, TASK_BIT_0);
+			vTaskDelay(1000);
+			
+			app_nrf_GetNewStation();   /*检查是否新的基站设备接入*/
+		}
+		
+		else if(tmp == PHY_LINK_OFF)//无网
+		{	
+			#if APP_DEBUG
+			printf("Unknown PHY Link stauts.\r\n");
+			#endif
+			connect_again();//重连服务器
+		}
+	}
+}
+
+/*
+*********************************************************************************************************
+*	函 数 名: vTaskTaskBleIF
+*	功能说明: NRF串口数据处理
+*	形    参: pvParameters 是在创建该任务时传递的形参
+*	返 回 值: 无
+* 优 先 级: 3  (数值越小优先级越低，这个跟uCOS相反)
+*********************************************************************************************************
+*/
+static void vTaskTaskBleIF(void *pvParameters)
+{
+	EventBits_t uxBits;
+	const TickType_t xTicksToWait = 10 / portTICK_PERIOD_MS; /* 最大延迟100ms */
+	
+	while(1)
+	{	
+		/*判断是否有升级标志组*/
+		uxBits = xEventGroupWaitBits(xUpdataEventGroup, 	/* 事件标志组句柄 */
+										 TASK_UPDATSTART_BIT,       			/* 等待TASK_BIT_ALL被设置 */
+										 pdFALSE,            							/* 退出前TASK_UPDATSTART_BIT不清除*/
+										 pdTRUE,             		          /* 设置为pdTRUE表示等待TASK_BIT_ALL都被设置*/
+										 xTicksToWait); 								 	/* 等待延迟时间 */
+		
+		if(uxBits != TASK_UPDATSTART_BIT)
+		{
+			app_plat_SendMessage();     /*发送消息缓存中的消息*/
+							
+			/*有效的蓝牙识别器个数*/
+//			if((sysCfg.parameter.nrfcount > 0))
+//			{			
+//				for(uint8_t i=0;i<sysCfg.parameter.nrfcount;i++)
+//				{
+//					/*串口传输最大速度115200bps=14400Bps 广播数据每包最大210Byte 按照最大速度需要14.5ms*/
+//					app_nrf_GetBleData((uint8_t *)sysCfg.parameter.nrfidlist[i]);
+//					vTaskDelay(20);   /*延时25ms保证485总线正确传输*/
+//				}
+//			}
+			
+			app_nrf_DealBleData(); 
+		}
+		
+		/* 发送事件标志，表示任务正常运行 */
+		xEventGroupSetBits(xCreatedEventGroup, TASK_BIT_1);
+	}
+}
+
+/*
+*********************************************************************************************************
+*	函 数 名: vTaskStart
+*	功能说明: 启动任务
+*	形    参: pvParameters 是在创建该任务时传递的形参
+*	返 回 值: 无
+* 优 先 级: 2  
+*********************************************************************************************************
+*/
+static void vTaskStart(void *pvParameters)
+{
+	uint8_t rc;  //DHCP状态
+  
+	EventBits_t uxBits;
+	const TickType_t xTicksToWait = 100 / portTICK_PERIOD_MS; /* 最大延迟100ms */
+	do_ntp_client();
+	
+	/* 打印系统开机状态，方便查看系统是否复位 */
+  #if APP_DEBUG
+	printf("Net init ok\r\n");
+	#endif
+	
+	app_config_start();
+  
+	#if APP_DEBUG	
+	printf("Ready to run DHCP...");
+	#endif
+	
+	do {
+	   rc=DHCP_run();			
+	}while(rc!=DHCP_IP_LEASED);
+	do_ntp_client();
+	#if APP_DEBUG
+	printf("IP leased\r\n");
+	printf("Ready to connect mqtt server...\r\n");
+	#endif
+	mqtt_connect(sysCfg.parameter.server_ip, sysCfg.parameter.server_port, (char *)sysCfg.parameter.server_user , (char *)sysCfg.parameter.server_pass ); //连接服务器	
+	vTaskDelay(500);   
+	do_ntp_client();                /*获取上电网络时间*/
+	app_palt_fifoinit();            /*初始化信息存储FIFO*/
+		
+	app_nrf_ResetStation();                /*复位蓝牙*/
+	app_palt_SubscribandPublishMyTopic();  /*订阅需要订阅的主题*/
+		
+	while(1)
+	{
+		/* 等待所有任务发来事件标志 */
+		uxBits = xEventGroupWaitBits(xCreatedEventGroup, 	/* 事件标志组句柄 */
+										 TASK_BIT_ALL,       							/* 等待TASK_BIT_ALL被设置 */
+										 pdTRUE,            							/* 退出前TASK_BIT_ALL被清除，这里是TASK_BIT_ALL都被设置才表示“退出”*/
+										 pdTRUE,             							/* 设置为pdTRUE表示等待TASK_BIT_ALL都被设置*/
+										 xTicksToWait); 								 	/* 等待延迟时间 */
+	
+		if((uxBits & TASK_BIT_ALL) == TASK_BIT_ALL)
+		{
+			IWDG_Feed();  /*喂狗*/
+			//printf("用户任务都正常运行\r\n");
+		}
+		
+		vTaskDelay(1000);
+	}
+}
+
+/*
+*********************************************************************************************************
+*	函 数 名: vTaskMsgPro 最高优先级任务，初次启动会阻塞
+*	功能说明: 信息处理,最高优先级任务，只要接收到服务器，触发中断，会立即运行此任务，
+            解析数据类型 消息类型：订阅消息，连接确认，ping响应
+*	形    参: pvParameters 是在创建该任务时传递的形参
+
+*	返 回 值: 无
+* 优 先 级: 4  
+*********************************************************************************************************
+*/
+static void vTaskMsgPro(void *pvParameters)
+{
+	uint8_t ping_flag=1;
+	BaseType_t xResult;
+
+	plat_report_t report_t;
+	report_t.updata_start_flag=0;
+	
+  while(1)
+  {
+		xResult = xSemaphoreTake(xSemaphore, portMAX_DELAY);	//阻塞，等待中断give二值信号，以解除阻塞 portMAX_DELAY 表示一直等待
+		if(xResult == pdTRUE)	 /* 接收到同步信号 */  
+		{
+			/*解析平台数据*/
+			if(SUCCESS == app_palt_Reportparse(&report_t))
+			{
+				switch( report_t.evt_id )
+				{
+					case PUBLISH:   /*接收订阅主题数据*/
+						app_palt_Receicedata(&report_t);
+					  break;
+					case CONNACK:   /*连接回执*/
+						app_palt_Connectack(&report_t);
+						break;
+					case PINGRESP:  /*将标志位放入消息队列中，在定时器回调函数判断是否有响应*/
+						xQueueSend(xQueue1, (void *) &ping_flag,(TickType_t)10);  
+						break;
+					default:
+						break;
+				}	
+				
+				/*升级数据，写升级事件标志*/
+				if(report_t.updata_start_flag == 1)
+				{
+					#if APP_DEBUG
+					printf("updata start.\r\n");
+					#endif
+					
+					bsp_LedOn(2);
+					report_t.updata_start_flag=0;
+					xEventGroupSetBits(xUpdataEventGroup, TASK_UPDATSTART_BIT);		
+				}
+		  }
+    }
+  }	
+}
+
+/*
+*********************************************************************************************************
+*	函 数 名: AppTaskCreate
+*	功能说明: 创建应用任务
+*	形    参：无
+*	返 回 值: 无
+*********************************************************************************************************
+*/
+static void AppTaskCreate (void)
+{
+	xTaskCreate( vTaskCheckNet,    		    /* 任务函数  */
+                 "vTaskCheckNet",  			/* 任务名    */
+                 1024,         					/* 任务栈大小，单位word，也就是4字节 */
+                 NULL,        					/* 任务参数  */
+                 1,           					/* 任务优先级*/
+                 &xHandleTaskLED ); 		/* 任务句柄  */
+	
+	xTaskCreate( vTaskTaskBleIF,   			  /* 任务函数  */
+                 "vTaskUserIF",     		/* 任务名 	*/
+                 1024,               		/* 任务栈大小，单位word，也就是4字节 */
+                 NULL,              		/* 任务参数  */
+                 2,                 	  /* 任务优先级*/
+                 &xHandleTaskUserIF );  /* 任务句柄  */
+
+		xTaskCreate( vTaskStart,     				/* 任务函数  */
+								 "vTaskStart",   				/* 任务名    */
+								 512,            				/* 任务栈大小，单位word，也就是4字节 */
+								 NULL,           				/* 任务参数  */
+								 3,              				/* 任务优先级*/
+								 &xHandleTaskStart );   /* 任务句柄  */
+	
+	xTaskCreate( vTaskMsgPro,     				/* 任务函数  */
+                 "vTaskMsgPro",   			/* 任务名    */
+                 2048,           	      /* 任务栈大小，单位word，也就是4字节 */
+                 NULL,           				/* 任务参数  */
+                 4,               			/* 任务优先级*/
+                 &xHandleTaskMsgPro );  /* 任务句柄  */
+}
+
+/*******************************************************************************
+* 函数名  : EXTI9_5_IRQHandler
+* 描述    : 中断线5中断服务函数(W5500 INT引脚中断服务函数)
+* 输入    : 无
+* 返回值  : 无
+*******************************************************************************/
+void EXTI9_5_IRQHandler(void)
+{
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	if(EXTI_GetITStatus(EXTI_Line5) != RESET)
+	{
+		EXTI_ClearITPendingBit(EXTI_Line5);
+		
+  	/* 发送计数信号量*/
+	  xSemaphoreGiveFromISR(xSemaphore, &xHigherPriorityTaskWoken);
+
+	  /* 如果xHigherPriorityTaskWoken = pdTRUE，那么退出中断后切到当前最高优先级任务执行 */
+	  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+	}
+}
+
+/*******************************************************************************
+* 函数名  : EXTI9_5_IRQHandler
+* 描述    : 中断线5中断服务函数(W5500 INT引脚中断服务函数)
+* 输入    : 无
+* 返回值  : 无
+*******************************************************************************/
+void EXTI15_10_IRQHandler(void)
+{
+	uint32_t i = 0;
+
+	if(EXTI_GetITStatus(EXTI_Line10) != RESET)
+	{
+		EXTI_ClearITPendingBit(EXTI_Line10);
+   
+		delay_ms(20);
+
+    if(0 == GPIO_ReadInputDataBit( GPIOF , GPIO_Pin_10 ))	     /*按键按下*/
+		{			
+			key_timer_Start();                                       /*按下开始计时*/
+			sysCfg.parameter.key_time_count = 0;
+			bsp_Initkey_Triggertype(EXTI_Trigger_Rising);            /*检测上升沿触发*/
+		}
+		else if(1 == GPIO_ReadInputDataBit( GPIOF , GPIO_Pin_10 )) /*按键松开*/ 	
+		{
+			key_timer_Stop();                                        /*关闭按键计时*/
+			sysCfg.parameter.key_time_count = 0;
+			bsp_Initkey_Triggertype(EXTI_Trigger_Falling);           /*检测下升沿触发*/
+		}
+	}		
+}
+
+void TIM2_IRQHandler(void)
+{		
+  //检测是否发生溢出更新事件
+  if(TIM_GetITStatus(TIM2, TIM_IT_Update) != RESET)
+  {
+		TIM_ClearITPendingBit(TIM2 , TIM_FLAG_Update);
+		
+		sysCfg.parameter.key_time_count++;
+		
+		if(sysCfg.parameter.key_time_count == 50)   /*长按5s*/
+		{
+		  bsp_LedOn(4);
+			delay_ms(100);
+	    sysCfg.parameter.config_hold_flag = 0xff;
+			
+			if(0 == bsp_WriteCpuFlash(SYSCFG_ADDR,sysCfg.data,SYSCFG_DATA_LEN))
+			{
+				NVIC_SystemReset();		
+			}
+		}
+	}
+}
+
+/*
+*********************************************************************************************************
+*	函 数 名: AppObjCreate
+*	功能说明: 创建任务通信机制
+*	形    参: 无
+*	返 回 值: 无
+*********************************************************************************************************
+*/
+static void AppObjCreate (void)
+{
+	uint8_t i=0;
+	const TickType_t  xTimerPer = 120000;
+	/* 创建二值信号量，首次创建信号量计数值是0 */
+	xSemaphore = xSemaphoreCreateBinary();
+	if(xSemaphore == NULL)
+	{
+		printf("create xSemaphore fail\r\n");
+		while(1);
+	}
+	/* 创建检测任务运行事件标志组*/
+	xCreatedEventGroup = xEventGroupCreate();
+	if(xCreatedEventGroup == NULL)
+	{
+		printf("create EventGroup fail\r\n");
+		while(1);
+	}	
+	
+	/*创建消息队列 消息队列长度为1*/
+	xQueue1 = xQueueCreate(1, sizeof(uint8_t));
+	if( xQueue1 == 0 )
+	{
+		printf("QueueCreate fail\r\n");
+	}
+
+	/* 创建升级事件标志组*/
+	xUpdataEventGroup = xEventGroupCreate();
+	if(xUpdataEventGroup == NULL)
+	{
+		printf("create xUpdataEventGroup fail\r\n");
+		while(1);
+	}	
+	
+	xPingTimers = xTimerCreate("Timer",   /* 定时器名字 */
+									 xTimerPer,    				/* 定时器周期,单位时钟节拍 */
+									 pdTRUE ,         		/* 周期性 */
+									 (void *) i,      		/* 定时器ID */
+									 vPingTimerCallback); /* 定时器回调函数 */
+
+	if(xPingTimers == NULL)
+	{
+		printf("create xTimers fail\r\n");
+		while(1);
+	}
+	else
+	{
+		 if(!xTimerStart(xPingTimers, 100) == pdPASS)
+		 {
+			 printf("Start ping Timer fail!\r\n");
+		 }
+	}
+}
+
+/*
+*********************************************************************************************************
+*	函 数 名: vTimerCallback
+*	功能说明: 定时器回调函数
+*	形    参: 无
+*	返 回 值: 无
+*********************************************************************************************************
+*/
+static void vPingTimerCallback(xTimerHandle pxTimer)
+{
+	uint8_t Pingflag=0;
+	BaseType_t xResult;
+	const TickType_t xMaxBlockTime = pdMS_TO_TICKS(5000); /* 设置最大等待时间为1000ms */
+	uint8_t ucQueueValue;
+	configASSERT(pxTimer);
+	
+	Pingflag=Heartbeat();
+	if(!Pingflag)      /*向服务器发送ping失败*/
+	{
+		connect_again(); //重连服务器	
+		return;
+	}
+	
+	/*长度相等，数据已经完整传送到WW5500发送缓冲区*/
+	xResult = xQueueReceive(xQueue1,                     /* 消息队列句柄 */
+		                        (void *)&ucQueueValue,     /* 存储接收到的数据到变量ucQueueMsgValue中 */
+		                        (TickType_t)xMaxBlockTime);/* 设置阻塞时间 */
+		
+	if(xResult != pdPASS || ucQueueValue !=1)
+	{
+		#if APP_DEBUG
+		printf("no ping respond.\r\n");
+		#endif
+		connect_again();	//重连服务器
+	}
+}

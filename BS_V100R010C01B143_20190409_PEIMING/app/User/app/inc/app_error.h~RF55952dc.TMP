@@ -1,0 +1,22 @@
+#ifndef APP_ERROR_H
+#define APP_ERROR_H
+
+#include "stm32f10x.h"
+
+#ifndef ERRORLOG
+#define ERRORLOG  1
+#endif
+
+#ifndef APP_DEBUG
+#define APP_DEBUG  0
+#endif
+
+/*´íÎóµÈ¼¶*/
+#define INFO    0x01
+#define WARN    0x02
+#define ERR     0x03
+
+void ErrorLog(uint8_t errlevel,char *err);
+
+#endif
+

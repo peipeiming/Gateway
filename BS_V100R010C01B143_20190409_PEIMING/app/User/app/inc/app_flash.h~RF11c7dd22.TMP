@@ -1,0 +1,73 @@
+#ifndef __APP_FLASH_H
+#define __APP_FLASH_H
+
+#include "stm32f10x.h"
+
+/*****************************************
+系统参数存储地址 预留空间大小 512 Byte
+存储顺序（从低到高字节）：
+0~40Byte:网络连接参数
+42~ ：485地址参数
+*****************************************/
+#define SYSCFG_ADDR        (0x08000000 + 0x80000 - 0x200)
+
+#define CFG_HOLDER	       0xCF
+
+
+#define SERVER_PORT        1883
+#define CLIENT_PORT        6000
+#define CLIENT_ID          "00000017"
+#define SERVER_USER        "CdGateway"
+#define SERVER_PASS        "0d2ff5970d1c4759a6ade32da30866ab"
+#define HARDWARE_VERSION   "MCBR02_V1.2"  
+#define SOFTWARE_VERSION   "V100R001C01B011_0623" 
+
+#define SYSBASEINFO_LEN    128
+#define SYSTATALINFO_LEN   288
+
+/*配置信息结构体*/
+typedef struct
+{
+	/*连接参数*/
+	uint8_t server_ip[4];
+	uint8_t client_mac[6];
+	uint16_t client_port;
+	uint16_t server_port;
+	uint8_t client_id[9];
+
+	uint8_t flag;
+	
+  uint16_t nrfcount;           /*蓝牙基站个数*/
+	uint16_t beacount;           /*蓝牙信标个数*/
+	
+	uint8_t bealist[25][4];      /*蓝牙考勤信标组数*/
+	uint8_t nrfidlist[20][8];    /*485地址信息*/
+}CfgPara;
+
+typedef union
+{
+	CfgPara parameter;
+	uint8_t data[SYSTATALINFO_LEN];
+}SysCfg;
+
+extern SysCfg sysCfg;
+
+void app_flash_GetReaderList(uint8_t *Serialnumber);
+void app_flash_GetBeaconList(uint8_t *Serialnumber);
+
+ErrorStatus app_flash_LoadSysConfig(void);
+ErrorStatus app_flash_LoadReaderCfg(void);
+
+ErrorStatus app_flash_ReadReaderIDCount(uint8_t *data);
+ErrorStatus app_flash_WriteReaderIDCount(uint8_t WriteIDCount);
+ErrorStatus app_flash_AddReaderID(uint8_t *ReaderID,uint32_t addr);
+ErrorStatus app_flash_DeleReader(uint8_t *Reader,uint8_t *Serialnumber);
+ErrorStatus app_flash_DeleBeacon(uint8_t *beacon,uint8_t *Serialnumber);
+
+ErrorStatus app_flash_SetDeviceIPandPORT(uint8_t *ip , uint16_t port);
+ErrorStatus app_flash_AddReader(uint8_t *Reader,uint8_t *Serialnumber);
+ErrorStatus app_flash_AddBeacon(uint8_t *beacon,uint8_t *Serialnumber);
+ErrorStatus app_flash_SetDeviceClient(uint8_t *client_mac , char *client_id);
+
+#endif
+

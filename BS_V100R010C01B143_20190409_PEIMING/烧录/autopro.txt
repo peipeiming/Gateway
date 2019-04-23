@@ -1,0 +1,9 @@
+si 1 
+speed 4000 
+r 
+h 
+loadfile "E:\project\蓝牙网关\Software\Gateway\V100R010_备份\V13以上\BS_V100R010C01B143_20190409_PEIMING\烧录\firmware\app\output.hex" 
+loadfile "E:\project\蓝牙网关\Software\Gateway\V100R010_备份\V13以上\BS_V100R010C01B143_20190409_PEIMING\烧录\firmware\bootlaoder\bootloader.hex" 
+r 
+g 
+q 

@@ -1,0 +1,11 @@
+.\flash\obj\mqttformat.o: ..\..\MQTT\MQTTFormat.c
+.\flash\obj\mqttformat.o: ..\..\MQTT\StackTrace.h
+.\flash\obj\mqttformat.o: D:\MDK5\ARM\ARMCC\Bin\..\include\stdio.h
+.\flash\obj\mqttformat.o: ..\..\MQTT\MQTTPacket.h
+.\flash\obj\mqttformat.o: ..\..\MQTT\MQTTConnect.h
+.\flash\obj\mqttformat.o: ..\..\MQTT\MQTTPublish.h
+.\flash\obj\mqttformat.o: ..\..\MQTT\MQTTSubscribe.h
+.\flash\obj\mqttformat.o: ..\..\MQTT\MQTTUnsubscribe.h
+.\flash\obj\mqttformat.o: ..\..\MQTT\MQTTFormat.h
+.\flash\obj\mqttformat.o: ..\..\MQTT\MQTTPacket.h
+.\flash\obj\mqttformat.o: D:\MDK5\ARM\ARMCC\Bin\..\include\string.h

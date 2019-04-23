@@ -1,0 +1,11 @@
+.\flash\obj\mqttunsubscribeserver.o: ..\..\MQTT\MQTTUnsubscribeServer.c
+.\flash\obj\mqttunsubscribeserver.o: ..\..\MQTT\MQTTPacket.h
+.\flash\obj\mqttunsubscribeserver.o: ..\..\MQTT\MQTTConnect.h
+.\flash\obj\mqttunsubscribeserver.o: ..\..\MQTT\MQTTPublish.h
+.\flash\obj\mqttunsubscribeserver.o: ..\..\MQTT\MQTTSubscribe.h
+.\flash\obj\mqttunsubscribeserver.o: ..\..\MQTT\MQTTUnsubscribe.h
+.\flash\obj\mqttunsubscribeserver.o: ..\..\MQTT\MQTTFormat.h
+.\flash\obj\mqttunsubscribeserver.o: ..\..\MQTT\StackTrace.h
+.\flash\obj\mqttunsubscribeserver.o: D:\MDK5\ARM\ARMCC\Bin\..\include\stdio.h
+.\flash\obj\mqttunsubscribeserver.o: ..\..\MQTT\MQTTPacket.h
+.\flash\obj\mqttunsubscribeserver.o: D:\MDK5\ARM\ARMCC\Bin\..\include\string.h

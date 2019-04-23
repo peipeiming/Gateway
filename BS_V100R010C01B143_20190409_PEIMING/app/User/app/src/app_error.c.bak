@@ -1,0 +1,40 @@
+#include "includes.h"
+
+void ErrorLog(uint8_t errlevel,char *err)
+{
+	uint16_t crcdata;
+	uint8_t topicdata[256]={0x00,0x00,0x4A};
+	static uint32_t ErrSerialNumber=0;
+ 
+  char *log[]={"INF","WAR","ERR"};
+	char buf[100]={0};
+	
+  #if ERROR_DEBUG
+	memset(buf,0,sizeof(buf));
+	sprintf(buf,"[%s] <%02d/%02d %02d:%02d> %s",log[errlevel-1],nowdate.time.month,nowdate.time.day,nowdate.time.hour,nowdate.time.minute,err);
+	printf("%s\r\n",buf);
+  #endif  
+	
+	topicdata[0]=(21+strlen(err))%256;                     /*有效信息长度字节（低）*/
+	topicdata[1]=(21+strlen(err))/256;                     /*有效信息长度字节（高）*/
+	topicdata[2]=ERROR;                                    /*错误信息Msg_id*/
+	
+	memset(&topicdata[3],0,2); 														 /*蓝牙网关设备高字节对齐*/
+	memcpy(&topicdata[5],sysCfg.parameter.client_mac,6);   /*蓝牙网关设备MAC*/
+	
+	memcpy(&topicdata[11],&errlevel,1);                    /*错误等级*/
+	memcpy(&topicdata[12],nowdate.data,7);								 /*错误时间戳*/  
+  sprintf((char *)&topicdata[19],"%s",err);              /*错误信息*/
+	
+	memcpy(&topicdata[19+strlen(err)],(uint8_t *)&ErrSerialNumber,4);
+	ErrSerialNumber++;
+	
+	/*CRC校验*/
+	crcdata=app_plat_usMBCRC16(topicdata,topicdata[0]+topicdata[1]*256+2);
+	memcpy(&topicdata[23+strlen(err)],(uint8_t *)&crcdata,2);
+	
+	/*上报数据*/
+  mqtt_publish( ERRORLOG_TOPIC , (char *)topicdata , topicdata[0]+topicdata[1]*256+4);
+}
+
+

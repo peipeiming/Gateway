@@ -1,0 +1,11 @@
+.\flash\obj\mqttserializepublish.o: ..\..\MQTT\MQTTSerializePublish.c
+.\flash\obj\mqttserializepublish.o: ..\..\MQTT\MQTTPacket.h
+.\flash\obj\mqttserializepublish.o: ..\..\MQTT\MQTTConnect.h
+.\flash\obj\mqttserializepublish.o: ..\..\MQTT\MQTTPublish.h
+.\flash\obj\mqttserializepublish.o: ..\..\MQTT\MQTTSubscribe.h
+.\flash\obj\mqttserializepublish.o: ..\..\MQTT\MQTTUnsubscribe.h
+.\flash\obj\mqttserializepublish.o: ..\..\MQTT\MQTTFormat.h
+.\flash\obj\mqttserializepublish.o: ..\..\MQTT\StackTrace.h
+.\flash\obj\mqttserializepublish.o: D:\MDK5\ARM\ARMCC\Bin\..\include\stdio.h
+.\flash\obj\mqttserializepublish.o: ..\..\MQTT\MQTTPacket.h
+.\flash\obj\mqttserializepublish.o: D:\MDK5\ARM\ARMCC\Bin\..\include\string.h

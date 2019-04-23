@@ -1,0 +1,965 @@
+#include "includes.h"
+
+static app_plat_fifo mes_fifo;
+static uint8_t mes_rxbuf[MES_RX_BUF_SIZE];
+
+char base_topic[]="/devid_0000000000000000";
+
+/****************************订阅主题******************************/
+char sms_topic[]="/devid_0000000000000000/notice/sms";
+char userinfo_topic[]="/devid_0000000000000000/user_info/set";
+char gateupdata_topic[]="/devid_0000000000000000/update/gateway";
+char addrmanagement_topic[]="/devid_0000000000000000/management/addr";
+char softversion_topic[]="/devid_0000000000000000/version/softversion";
+char beaconmanagement_topic[]="/devid_0000000000000000/management/beacon";
+
+/*
+*********************************************************************************************************
+ * 函数名：app_palt_WriteFifoData
+ * 描述  ：消息数据存入缓存中
+ * 输入  ：p，待存储的数据
+ *       : len，待存储数据长度
+ * 返回  : 无
+*********************************************************************************************************
+ */
+static void app_palt_WriteFifoData(uint8_t *p,uint8_t len)
+{
+	uint8_t i;
+		
+	mes_fifo.pRxBuf[mes_fifo.usRxWrite]=0x5a;
+	if (++mes_fifo.usRxWrite >= mes_fifo.usRxBufSize)
+	{
+		mes_fifo.usRxWrite = 0;
+	}
+	
+	mes_fifo.usRxCount++;
+	for(i=0;i<len;i++)
+	{
+		/*如果待读取的数据总数小于FIFO的大小,则写入*/
+		if (mes_fifo.usRxCount<mes_fifo.usRxBufSize)
+		{
+			mes_fifo.pRxBuf[mes_fifo.usRxWrite]=p[i];
+			if (++mes_fifo.usRxWrite >= mes_fifo.usRxBufSize)
+			{
+				mes_fifo.usRxWrite = 0;
+			}
+			mes_fifo.usRxCount++;
+		}
+	}
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_palt_BandData
+ * 描述  ：手环通信，下发SMS消息
+ * 输入  ：TopicInfo,主题信息
+ * 	     ：Len，主题信息总长度
+ * 返回  : 无
+*********************************************************************************************************
+ */
+static void app_palt_BandData(uint8_t *TopicInfo,uint16_t  Len)
+{
+  uint16_t crcdata;
+	uint8_t backdata[26]={0x16,0x00,0x1A};
+	
+	backdata[2]=BANDDATABACK;
+	memcpy(&backdata[3],&TopicInfo[11],8);         /*手环MAC（小端）*/
+	memcpy(&backdata[11],&TopicInfo[19],8);        /*消息发送时间戳*/
+	memcpy(&backdata[20],&TopicInfo[Len-6],4);     /*流水号*/
+		
+  /*发起连接 传入参数包含读头的ID*/
+	if(SUCCESS != app_nrf_ConnectBle(&TopicInfo[3],&TopicInfo[11]))
+	{
+		#if APP_DEBUG
+		printf("app_palt_BandData:Link bracelet fail.\r\n");
+		#endif
+		backdata[19]=0x01;    
+		crcdata=app_plat_usMBCRC16(backdata,24);       /*CRC校验*/
+		memcpy(&backdata[24],(uint8_t *)&crcdata,2);		
+    mqtt_publish( SMSBCD_TOPIC , (char *)backdata , 26);
+
+		if(ERROR == app_nrf_DisconnectBle(&TopicInfo[3]))
+		{
+			#if APP_DEBUG
+			printf("app_palt_BandData:disconnet error.\r\n");
+			#endif			
+		}	
+		return;    	        /*连接失败*/	
+	}
+	
+	vTaskDelay(1000);	
+	if(SUCCESS == app_nrf_LeaveMessage(&TopicInfo[3],&TopicInfo[27],Len-33)) 
+	{
+		#if APP_DEBUG
+		printf("Leave Message OK.\r\n");
+		#endif
+		backdata[19]=0x03;  /*手环收到*/
+		crcdata=app_plat_usMBCRC16(backdata,24);       /*CRC校验*/
+		memcpy(&backdata[24],(uint8_t *)&crcdata,2);	
+		mqtt_publish( SMSBCD_TOPIC , (char *)backdata , 26);
+
+		vTaskDelay(1000);
+		return;
+	}  
+	
+	backdata[19]=0x02; 												  /*手环未收到消息*/
+	crcdata=app_plat_usMBCRC16(backdata,24);    /*CRC校验*/
+  memcpy(&backdata[24],(uint8_t *)&crcdata,2);	
+	mqtt_publish( SMSBCD_TOPIC , (char *)backdata , 26);
+
+	#if APP_DEBUG
+	printf("app_palt_BandData:Leave a message fail.\r\n");
+	#endif
+	if(ERROR == app_nrf_DisconnectBle(&TopicInfo[3]))
+	{
+		#if ERRORLOG
+		ErrorLog(	ERR ,"app_palt_BandData:disconnet error");
+		#endif			
+	}	
+	vTaskDelay(1000);
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_plat_GetRespone
+ * 描述  ：获取消息类型
+ * 输入  ：topic,消息主题
+ *			 : pRespone，存放消息类型
+ * 返回  : 
+ *       ：SUCCESS,是待处理的消息类型；
+ *       ：ERROR，不是待处理的消息类型
+*********************************************************************************************************
+*/
+static ErrorStatus app_plat_GetRespone(uint8_t *TopicInfo,char *topic,app_plat_topic* pRespone)
+{
+	uint8_t i,j;
+  
+	#if 0
+	printf("Receive topic:%s\r\n",topic);
+	#endif
+	
+	if( NULL!=strstr( topic, "/devid_"))         
+	{		
+		for(i=0;i<16;i++)
+		{
+			if(topic[7+i]!=base_topic[7+i])
+			{
+				printf("not device info.\r\n");
+				return ERROR;  /*不是本信息主机的id*/
+			}	
+		}
+  }	
+	else  /*没有设备主题*/
+	{
+		return ERROR;
+	}
+		
+   /*下发消息主题*/
+	if( NULL!=strstr( topic, "/notice/sms"))
+	{			
+    /*判断是否为本物联网网关下的基站设备*/
+		for(i=0;i<sysCfg.parameter.nrfcount;i++)
+		{
+			for(j=0;j<8;j++)
+			{
+				if(sysCfg.parameter.nrfidlist[i][j]!=TopicInfo[3+j])
+				{
+					break;
+				}				
+			}
+			if(j==8) /*是本物联网主控端下的蓝牙网关设备*/
+			{
+				*pRespone= PLAT_RESPONSE_SEND_MESSAGE;
+				return SUCCESS;
+			}
+		}		
+    
+		return ERROR;
+	}
+	
+	/*485地址管理*/
+	else if( strstr( topic, "/management/addr"))
+	{
+		*pRespone= PLAT_RESPONSE_ADDRMANAGEMENT;
+		return SUCCESS;
+	}
+
+	/*考勤信标管理管理*/
+	else if( strstr( topic, "/management/beacon"))
+	{
+		*pRespone= PLAT_RESPONSE_BEAMANAGEMENT;
+		return SUCCESS;
+	}
+	
+	/*设备升级*/
+	else if( strstr( topic, "/update/gateway"))
+	{
+		*pRespone= PLAT_RESPONSE_DEVUPDATE;
+		return SUCCESS;
+	}
+	
+	else if( strstr( topic, "/user_info/set"))
+	{
+		*pRespone= PLAT_RESPONSE_USERINFOSET;
+		return SUCCESS;
+	}
+	
+	else
+	{
+		return ERROR;
+	}
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_palt_AddrManagement
+ * 描述  ：信息机485蓝牙路由器地址管理
+ * 输入  ：
+ *       : TopicInfo,主题信息
+ * 返回  : 无
+*********************************************************************************************************
+*/
+static void app_palt_AddrManagement(uint8_t *TopicInfo)
+{
+	switch(TopicInfo[3])
+	{
+		/*获取蓝牙路由器地址列表*/
+		case 0x00:
+			app_flash_GetStationList(&TopicInfo[12]);
+			break;
+		
+		/*插入一个蓝牙路由器地址*/
+		case 0x01:
+			app_flash_AddStation(&TopicInfo[4],&TopicInfo[12]);
+			break;
+		
+		/*删除一个蓝牙路由器地址*/
+		case 0x02:
+			app_flash_DeleStation(&TopicInfo[4],&TopicInfo[12]);
+			break;
+		
+		default:
+			break;
+	}
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_palt_BeaconManagement
+ * 描述  ：考勤信标管理
+ * 输入  ：
+ *       : TopicInfo,主题信息
+ * 返回  : 无
+*********************************************************************************************************
+*/
+static void app_palt_BeaconManagement(uint8_t *TopicInfo)
+{
+	/*第一个信标在门内侧，第二个信标在门外侧*/
+	switch(TopicInfo[3])
+	{
+		/*获取信标列表*/
+		case 0x00:
+			app_flash_GetBeaconList(&TopicInfo[12]);
+			break;
+		
+		/*插入一组信标*/
+		case 0x01:
+			app_flash_AddBeacon(&TopicInfo[4],&TopicInfo[8]);
+			break;
+		
+		/*删除一组信标*/
+		case 0x02:
+			app_flash_DeleBeacon(&TopicInfo[4],&TopicInfo[8]);
+			break;
+		
+		default:
+			break;
+	}
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_palt_userinfoset
+ * 描述  ：用户信息设置
+ * 输入  ：
+ *       : TopicInfo,主题信息
+ *       : len,主题信息
+ * 返回  : 无
+*********************************************************************************************************
+*/
+static void app_palt_userinfoset(uint8_t *TopicInfo , uint16_t len )
+{
+	uint16_t crcdata;
+	uint16_t userlen;
+  uint8_t userinfo[512]={0};
+	uint8_t ask[26]={0x16,0x00,0x6a};
+	
+	if(len > 512)
+	{
+		return;
+	}
+	
+	userlen=len-33+1;                        									/*用户信息长度*/
+	memcpy( userinfo , TopicInfo , 27 );
+	memcpy( &userinfo[27] , (uint8_t *)&userlen , 2 );
+	userinfo[29]=1;                        						  			/*标志位*/
+	memcpy( &userinfo[30] , &TopicInfo[27] , len-33 );
+	crcdata=app_plat_usMBCRC16( &userinfo[27] , len-33+3 );
+	memcpy( &userinfo[30+len-33], (uint8_t *)&crcdata , 2 );  
+	memcpy( &userinfo[32+userlen], &TopicInfo[len-6] , 4 );   /*原信息中的流水号*/
+  userlen=TopicInfo[0]+TopicInfo[1]*256+5;
+	memcpy( userinfo , (uint8_t *)&userlen , 2 );
+	
+	/*CRC校验*/
+	crcdata=app_plat_usMBCRC16(userinfo,userinfo[1]*256+userinfo[0]+2);
+	memcpy(&userinfo[userinfo[1]*256+userinfo[0]+2],(uint8_t *)&crcdata,2);  
+	
+  #if 0
+	printf("topic data:");
+	for(i=0;i<len;i++)
+	{
+		printf("%02x ",TopicInfo[i]);
+	}
+	printf("\r\n");
+	printf("after deal:");
+	for(i=0;i<userinfo[1]*256+userinfo[0]+4;i++)
+	{
+		printf("%02x ",userinfo[i]);
+	}
+	printf("\r\n");
+	#endif
+	
+	memcpy(&ask[3],&TopicInfo[11],8);               /*手环MAC*/
+	memcpy(&ask[11],&TopicInfo[19],8);
+	ask[19]=0x03;        														
+	/*手环收到*/
+	memcpy(&ask[20],&TopicInfo[len-6],4);
+		
+	/*CRC校验*/
+	crcdata=app_plat_usMBCRC16(ask,ask[1]*256+ask[0]+2);
+	memcpy(&ask[24],(uint8_t *)&crcdata,2);  
+	
+	/*返回数据*/
+  mqtt_publish( USERINFO_TOPIC , (char *)ask , ask[1]*256+ask[0]+4);
+	
+	app_palt_WriteFifoData(userinfo,userinfo[1]*256+userinfo[0]+4);
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_plat_usMBCRC16
+ * 描述  ：数据CRC校验
+ * 输入  ：pucFrame,待处理数据
+ *			 : usLen，待处理数据长度
+ * 返回  : CRC校验值
+*********************************************************************************************************
+*/
+uint16_t app_plat_usMBCRC16( uint8_t * pucFrame, uint16_t usLen )
+{
+	uint8_t ucCRCHi = 0xFF;
+	uint8_t ucCRCLo = 0xFF;
+	uint16_t iIndex;
+	while( usLen-- )
+	{
+		iIndex = ucCRCLo ^ *( pucFrame++ );
+		ucCRCLo = ( uint8_t )( ucCRCHi ^ aucCRCHi[iIndex] );
+		ucCRCHi = aucCRCLo[iIndex];
+	}
+	return ( uint16_t )( ucCRCHi << 8 | ucCRCLo );
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_palt_SubscribMyTopic
+ * 描述  ：订阅用户需要订阅的主题
+ * 输入  ：无
+ * 返回  : 无
+*********************************************************************************************************
+ */
+void app_palt_SubscribandPublishMyTopic(void)
+{
+	static uint32_t VersionSerialNumber=0;
+	uint16_t crcdata;
+	uint8_t versioninfolen=0,errinfolen=0,datalen=0;
+	uint8_t versioninfo[256]={0x00,0x00,0x55};
+  uint8_t startstatus=0;
+	
+	uint32_t CSR = RCC->CSR;
+	
+	/*检查启动状态*/
+	if(CSR & (SFTRST_MASK | PORRSTF_MASK | IWDGRST_MASK | WWDGRST_MASK))
+	{
+		#if 0
+		printf("board reset by: %s %s %s %s\r\n",
+                   (CSR & PORRSTF_MASK)?"PORRSTF_MASK":"",
+                   (CSR & IWDGRST_MASK)?"IWDGRST":"",
+		               (CSR & SFTRST_MASK)?"SFTRST_MASK":"");
+    #endif
+		
+		if(CSR & SFTRST_MASK) 
+		{
+			startstatus=1;
+			#if ERRORLOG
+	    ErrorLog(INFO,"systerm soft reset.");
+		  #endif
+		}
+		else if(CSR & PORRSTF_MASK)
+		{
+			startstatus=2;
+			#if ERRORLOG
+	    ErrorLog(INFO,"system power reset.");
+		  #endif
+		}
+		else if(CSR & IWDGRST_MASK) 
+		{
+			startstatus=3;
+			#if ERRORLOG
+	    ErrorLog(INFO,"systerm iwdog reset.");
+		  #endif
+		}		
+    RCC_ClearFlag();
+	}
+  	
+	/*消息主题*/
+	if(0 != mqtt_subscrib(sms_topic)) 
+	{
+		#if APP_DEBUG
+		printf("subscrib topic:%s\r\n",sms_topic);
+		#endif
+	}
+
+	/*指定设备升级主题*/
+	if(0 != mqtt_subscrib(userinfo_topic))      
+	{
+		#if APP_DEBUG
+		printf("subscrib topic:%s\r\n",userinfo_topic);
+ 		#endif  
+	}		
+	
+	/*升级主题*/
+	if(0 != mqtt_subscrib(gateupdata_topic))      
+	{
+		#if APP_DEBUG
+		printf("subscrib topic:%s\r\n",gateupdata_topic);
+ 		#endif  
+	}	
+	
+	/*485地址管理主题*/
+	if(0 != mqtt_subscrib(addrmanagement_topic)) 
+	{
+		#if APP_DEBUG
+		printf("subscrib topic:%s\r\n",addrmanagement_topic);
+    #endif
+	}	
+	
+	/*考勤信标管理主题*/
+	if(0 != mqtt_subscrib(beaconmanagement_topic))   
+	{
+		#if APP_DEBUG
+		printf("subscrib topic:%s\r\n",beaconmanagement_topic);
+		#endif
+	}
+		
+	/*调试版本信息*/
+	mqtt_publish(softversion_topic,SOFTWARE_VERSION,strlen(SOFTWARE_VERSION));//上报版本号
+	
+	/*协议版本信息*/
+	versioninfo[2]=VERSION;                 								/*消息Msg_id*/
+	memset(&versioninfo[3],0,2); 														/*蓝牙网关设备高字节对齐*/
+	memcpy(&versioninfo[5],sysCfg.parameter.client_mac,6);  /*蓝牙网关设备MAC*/
+	versioninfo[11]=startstatus;   					                /*上电状态*/
+		
+  /*版本信息长度*/	
+	versioninfolen=strlen(SOFTWARE_VERSION)+strlen(HARDWARE_VERSION)+1;
+	versioninfo[12]=versioninfolen;
+	
+	datalen=(errinfolen+versioninfolen+17);
+	memcpy(&versioninfo[0],(uint8_t *)&datalen,2); /*消息总长度*/
+	
+	/*版本信息*/
+	sprintf((char *)&versioninfo[13],"%s%c%s",SOFTWARE_VERSION,' ',HARDWARE_VERSION);
+	memcpy(&versioninfo[13+versioninfolen],(uint8_t *)&errinfolen,2);         
+	
+	memcpy(&versioninfo[15+versioninfolen+errinfolen],(uint8_t *)&VersionSerialNumber,4);
+	VersionSerialNumber++;
+		
+	/*CRC校验*/
+	crcdata=app_plat_usMBCRC16(versioninfo,versioninfo[0]+versioninfo[1]*256+2);
+	memcpy(&versioninfo[19+versioninfolen+errinfolen],(uint8_t *)&crcdata,2);
+	
+	/*上报数据*/
+  mqtt_publish(VERSION_TOPIC , (char *)versioninfo , versioninfo[0]+versioninfo[1]*256+4);
+}
+
+
+/*
+*********************************************************************************************************
+ * 函数名：app_mes_fifoinit
+ * 描述  ：保存消息数据的FIFO初始化：设置写FIFO地址指针、读FIFO地址指针、FIFO大小等参数
+ * 输入  ：无
+ * 返回  : 无
+*********************************************************************************************************
+ */
+void app_palt_fifoinit(void)
+{
+	mes_fifo.pRxBuf=mes_rxbuf;
+	mes_fifo.usRxBufSize=MES_RX_BUF_SIZE;
+	mes_fifo.usRxCount=0;
+	mes_fifo.usRxRead=0;
+	mes_fifo.usRxWrite=0;
+}
+
+
+/*
+*********************************************************************************************************
+ * 函数名：app_plat_SendMessage
+ * 描述  ：发送消息给手环
+ * 输入  ：无
+ * 返回  : 无
+*********************************************************************************************************
+*/
+void app_plat_SendMessage(void)
+{ 
+	uint16_t crcdata;
+	uint16_t i=0,len=0;
+	uint8_t mes[300]={0};
+	
+	/*读数据包头*/
+	while(mes_fifo.usRxCount>0)
+	{
+		mes[i++]=mes_fifo.pRxBuf[mes_fifo.usRxRead];
+		if (++mes_fifo.usRxRead >= mes_fifo.usRxBufSize)
+		{
+			mes_fifo.usRxRead=0;
+		}
+		mes_fifo.usRxCount--;
+		 
+		if(mes[i-1]==0x5a)   /*数据包头*/
+		{
+			break;  
+		}
+  }
+	
+	/*缓存读空*/
+	if(mes_fifo.usRxCount==0) 
+	{
+		return;
+	}
+	
+	memset(mes,0,300);
+  for(i=0;i<2;i++)  /*读取长度*/
+	{
+		mes[i]=mes_fifo.pRxBuf[mes_fifo.usRxRead];
+		if (++mes_fifo.usRxRead >= mes_fifo.usRxBufSize)
+		{
+			mes_fifo.usRxRead=0;
+		}
+		mes_fifo.usRxCount--;
+	}
+	
+	/*长度检查*/
+	len=mes[0]+mes[1]*256;
+	if(len>300)
+	{
+		#if APP_DEBUG
+		printf("send mes len error.\r\n");
+	  #endif
+		return;
+	}
+	
+	/*读取有效数据*/
+  for(i=0;i<len+2;i++)
+	{
+		mes[2+i]=mes_fifo.pRxBuf[mes_fifo.usRxRead];
+		if (++mes_fifo.usRxRead >= mes_fifo.usRxBufSize)
+		{
+			mes_fifo.usRxRead=0;
+		}
+		mes_fifo.usRxCount--;
+	}
+	
+	#if 0
+	printf("have parsing data.\r\n");
+	for(i=0;i<len+4;i++)
+	{
+		printf("%2x ",mes[i]);
+	}
+	printf("\r\n");
+	#endif
+	
+	/*校验数据*/
+	crcdata=app_plat_usMBCRC16(mes,len+2);
+	
+	/*CRC检测*/
+	if(((crcdata%256)!=mes[len+2])||((crcdata/256)!=mes[len+3]))
+	{
+		#if APP_DEBUG
+		printf("send mes:CRC error\r\n");
+		#endif
+	}
+	
+	app_palt_BandData(mes,len+4);   /*下发消息*/
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_plat_SportDataPublish
+ * 描述  ：上报手环运动数据
+ * 输入  ：bracelet,手环MAC
+ *       : sportdata,运动数据，计步、卡路里、里程
+ * 返回  : 无
+*********************************************************************************************************
+*/
+void app_plat_SportDataPublish(uint8_t *bracelet,uint8_t *sportdata)
+{
+	uint16_t crcdata;
+	static uint32_t SportSerialNumber=0;
+	uint8_t topicdata[30]={0x1A,0x00,0x51};
+		
+	topicdata[2]=SPORT;               				   /*Msg_id*/
+	
+	memcpy(&topicdata[3],bracelet,6);			       /*手环MAC*/
+	memset(&topicdata[9],0,2);          				 /*手环MAC低字节补齐*/
+	memcpy(&topicdata[11],sportdata,6);			     /*运动数据*/
+	memcpy(&topicdata[17],nowdate.data,7);       /*时间戳*/
+	memcpy(&topicdata[24],(uint8_t *)&SportSerialNumber,4); /*流水号*/
+	SportSerialNumber++;
+		
+	/*CRC校验*/
+	crcdata=app_plat_usMBCRC16(topicdata,topicdata[1]*256+topicdata[0]+2);
+	memcpy(&topicdata[28],(uint8_t *)&crcdata,2);  
+	
+	/*上报数据*/
+  if(mqtt_publish( SPORT_TOPIC , (char *)topicdata , topicdata[1]*256+topicdata[0]+4))
+	{
+
+	}
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_plat_HeartratePublish
+ * 描述  ：上报手环心率数据
+ * 输入  ：bracelet,手环MAC
+ *       : heartrate,心率数据
+ * 返回  : 无
+*********************************************************************************************************
+*/
+void app_plat_HeartratePublish(uint8_t *bracelet,uint8_t heartrate)
+{
+	uint16_t crcdata;
+	static uint32_t HealthSerialNumber=0;
+	uint8_t topicdata[25]={0x15,0x00,0x52};
+	
+	topicdata[2]=HEALTH;                          /*Msg_id*/
+	
+	memcpy(&topicdata[3],bracelet,6);			        /*手环MAC*/
+	memset(&topicdata[9],0,2);          				  /*手环MAC低字节补齐*/
+	memcpy(&topicdata[11],&heartrate,1);          /*心率数据*/
+	memcpy(&topicdata[12],nowdate.data,7);        /*时间戳*/
+	memcpy(&topicdata[19],(uint8_t *)&HealthSerialNumber,4); /*流水号*/
+	HealthSerialNumber++;
+	
+	/*CRC校验*/
+	crcdata=app_plat_usMBCRC16(topicdata,topicdata[1]*256+topicdata[0]+2);
+	memcpy(&topicdata[23],(uint8_t *)&crcdata,2);  
+	
+	/*上报数据*/
+  if(mqtt_publish( HEALTH_TOPIC , (char *)topicdata , topicdata[1]*256+topicdata[0]+4))
+	{
+
+	}
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_plat_LocationPublish
+ * 描述  ：上报手环位置数据
+ * 输入  ：bracelet,手环MAC
+ *       : location,位置数据
+ *       : beaconelectricity，信标电量
+ *       : beastation，蓝牙基站设备MAC
+ * 返回  : 无
+*********************************************************************************************************
+*/
+void app_plat_LocationPublish(uint8_t *bracelet,uint8_t *location,uint8_t beaconelectricity,uint8_t *beastation)
+{
+	uint16_t crcdata;
+	static uint32_t LocationSerialNumber=0;
+	uint8_t topicdata[46]={0x2a,0x00,0x53};
+	
+	topicdata[2]=LOCATION;                                /*Msg_id*/
+	
+	memcpy(&topicdata[3],beastation,8);                   /*蓝牙基站设备MAC*/
+  memset(&topicdata[11],0,2);                           /*网关设备ID低字节补齐*/
+	memcpy(&topicdata[13],sysCfg.parameter.client_mac,6); /*网关ID*/
+	memcpy(&topicdata[19],bracelet,6);						        /*手环MAC*/
+	memset(&topicdata[25],0,2);          								  /*手环MAC低字节补齐*/
+	
+	memcpy(&topicdata[27],location,5);                    /*位置数据*/
+	memcpy(&topicdata[32],&beaconelectricity,1);          /*信标电量*/
+	memcpy(&topicdata[33],nowdate.data,7);                /*时间戳*/
+	
+	memcpy(&topicdata[40],(uint8_t *)&LocationSerialNumber,4); /*流水号*/
+	LocationSerialNumber++;
+	
+	/*CRC校验*/
+	crcdata=app_plat_usMBCRC16(topicdata,topicdata[1]*256+topicdata[0]+2);
+	memcpy(&topicdata[44],(uint8_t *)&crcdata,2);   
+	
+	/*上报数据*/
+  if(mqtt_publish( LOCATION_TOPIC , (char *)topicdata , topicdata[1]*256+topicdata[0]+4))
+	{
+		
+	}
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_plat_AttendancePublish
+ * 描述  ：上报手环考勤数据
+ * 输入  ：bracelet,手环MAC
+ *       : location,位置数据
+ *       : beastation，蓝牙基站设备MAC
+ *       : inoutflag,进出标志,1进，2出
+ * 返回  : 无
+*********************************************************************************************************
+*/
+void app_plat_AttendancePublish(uint8_t *bracelet,uint8_t *location,uint8_t *beastation,uint8_t inoutflag)
+{
+	uint16_t crcdata;
+	static uint32_t AttendancePSerialNumber=0;
+	uint8_t topicdata[46]={0x2a,0x00,0x53};
+	
+	topicdata[2]=ATTEN;                                   /*Msg_id*/
+	
+	memcpy(&topicdata[3],beastation,8);                   /*蓝牙基站设备MAC*/
+  memset(&topicdata[11],0,2);                           /*网关设备ID低字节补齐*/
+	memcpy(&topicdata[13],sysCfg.parameter.client_mac,6); /*网关ID*/
+	memcpy(&topicdata[19],bracelet,6);						        /*手环MAC*/
+	memset(&topicdata[25],0,2);          								  /*手环MAC低字节补齐*/
+	
+	memcpy(&topicdata[27],location,5);                    /*位置数据*/
+	memcpy(&topicdata[32],&inoutflag,1); 
+	memcpy(&topicdata[33],nowdate.data,7);                /*时间戳*/
+	memcpy(&topicdata[40],(uint8_t *)&AttendancePSerialNumber,4); 		/*流水号*/
+	AttendancePSerialNumber++;
+	
+	/*CRC校验*/
+	crcdata=app_plat_usMBCRC16(topicdata,topicdata[1]*256+topicdata[0]+2);
+	memcpy(&topicdata[44],(uint8_t *)&crcdata,2);   
+	
+	/*上报数据*/
+  if(mqtt_publish( ATTENDANCE_TOPIC , (char *)topicdata , topicdata[1]*256+topicdata[0]+4))
+	{
+		
+	}
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_plat_BraceletInfoPublish
+ * 描述  ：上报手环信息
+ * 输入  ：bracelet,手环MAC
+ *       : braceletelectricity，手环电量
+ * 返回  : 无
+*********************************************************************************************************
+*/
+void app_plat_BraceletInfoPublish(uint8_t *bracelet,uint8_t braceletelectricity)
+{
+	uint16_t crcdata;
+	static uint32_t BraceletInfoSerialNumber=0;
+	uint8_t topicdata[18]={0x0e,0x00,0x54};
+	
+	topicdata[2]=BASEINFOR;                              /*Msg_id*/	
+	
+	memcpy(&topicdata[3],bracelet,6);						         /*手环MAC*/
+	memset(&topicdata[9],0,2);          								 /*手环MAC低字节补齐*/
+	memcpy(&topicdata[11],&braceletelectricity,1);       /*手环电量*/
+	memcpy(&topicdata[12],(uint8_t *)&BraceletInfoSerialNumber,4);  /*流水号*/
+	BraceletInfoSerialNumber++;
+	
+	/*CRC校验*/
+	crcdata=app_plat_usMBCRC16(topicdata,topicdata[1]*256+topicdata[0]+2);
+	memcpy(&topicdata[16],(uint8_t *)&crcdata,2); 
+	
+	/*上报数据*/	
+  if(mqtt_publish( BASEINFOR_TOPIC , (char *)topicdata , topicdata[1]*256+topicdata[0]+4))
+	{
+
+	}
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_palt_DealPlatinfo
+ * 描述  ：处理平台信息,包括对对手环进行留言、设置信息机时间
+ * 输入  ：TopicInfo,平台信息
+ *			 : Len, 信息长度
+ *			 : topic, 接收到消息的主题
+ * 返回  : 无
+*********************************************************************************************************
+*/
+static void app_palt_Datadeal(uint8_t *TopicInfo,uint16_t Len,char * topic)
+{
+	uint16_t crcdata; 
+	app_plat_topic nState;
+  							
+  /*数据长度检查*/	
+	if((TopicInfo[0]+TopicInfo[1]*256)!=Len-4)
+	{
+		#if ERRORLOG
+		ErrorLog( ERR ,"DealPlatinfo:Topic len error");
+		#endif
+		return;
+	}
+	
+	/*CRC校验检查*/
+	crcdata=app_plat_usMBCRC16(TopicInfo,Len-2);
+	if((TopicInfo[Len-1]!=crcdata/256)||(TopicInfo[Len-2]!=crcdata%256))
+	{
+		#if ERRORLOG
+		ErrorLog( ERR ,"DealPlatinfo:CRC error");
+		#endif
+		return;
+	}
+
+	if(app_plat_GetRespone(TopicInfo , topic , &nState ))
+	{
+		switch(nState)
+		{
+			/*发送短消息*/
+			case PLAT_RESPONSE_SEND_MESSAGE:
+			  printf("Receive message.\r\n");
+				if((TopicInfo[0]+TopicInfo[1]*256-29)>230)
+				{
+					#if ERRORLOG
+					ErrorLog(	WARN ,"Message len Over limit");
+					#endif
+					return;
+				}
+				/*保存消息数据到缓存中*/
+				app_palt_WriteFifoData(TopicInfo,Len);
+				break;
+			
+			/*485蓝牙路由器地址管理*/
+			case PLAT_RESPONSE_ADDRMANAGEMENT:
+				app_palt_AddrManagement(TopicInfo);
+				break;
+			
+			/*设备升级*/
+			case PLAT_RESPONSE_DEVUPDATE:
+			  bsp_ota_Updatafirmware(Len,TopicInfo);  
+				break;
+			
+			/*考勤信标管理*/
+	    case PLAT_RESPONSE_BEAMANAGEMENT:
+				app_palt_BeaconManagement(TopicInfo);
+				break;
+			
+			/*设置用户信息*/
+			case PLAT_RESPONSE_USERINFOSET:
+				app_palt_userinfoset( TopicInfo , Len );
+				break;
+			
+			default:
+				break;
+		}
+	}
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_palt_Receicedata
+ * 描述  ：接收平台数据
+ * 输入  ：plat_report_t,平台信息结构体
+ * 返回  : 无
+*********************************************************************************************************
+*/
+void app_palt_Receicedata(plat_report_t * report_t)
+{
+	uint8_t  len;
+	uint8_t  dup;					//重复标志
+	uint8_t  ack[30];			//回执
+  uint8_t  retained;		//保留标志
+  uint8_t  *payload_in; //负载内容
+
+	uint16_t msgid;				//消息ID
+	
+	int qos;							//消息质量
+	int payloadlen_in;		//负载长度
+	MQTTString receivedTopic;
+	
+	/*解析消息内容*/
+	MQTTDeserialize_publish(&dup, &qos, &retained, &msgid, &receivedTopic,
+	&payload_in, &payloadlen_in, report_t->payload_data , PLAT_MAX_DATA_LEN );				
+
+	/*消息回执 订阅的QOS=1需要回执*/
+	len=MQTTSerialize_puback(ack, sizeof(ack),msgid);
+	transport_sendPacketBuffer(ack,len);
+
+	if(0 == strncmp(receivedTopic.lenstring.data,gateupdata_topic,strlen(gateupdata_topic))
+	&&(0x01 == payload_in[3]+payload_in[4]*256))
+	{
+		report_t->updata_start_flag=1;
+	}
+
+	app_palt_Datadeal(payload_in,payloadlen_in,receivedTopic.lenstring.data);	
+}
+
+void app_palt_Connectack(plat_report_t * report_t)
+{
+	uint8_t sessionPresent, connack_rc;
+	
+	if (MQTTDeserialize_connack(&sessionPresent, &connack_rc,  report_t->payload_data , PLAT_MAX_DATA_LEN) != 1 || (connack_rc != 0) )
+	{		
+		#if APP_DEBUG
+		printf("Unable to connect, return code %d\n\r", connack_rc); 
+		#endif								
+	}
+	else
+	{
+		#if APP_DEBUG
+		printf("MQTT connect OK\r\n");	
+		#endif
+	}
+}
+
+/*
+*********************************************************************************************************
+ * 函数名：app_palt_Reportparse
+ * 描述  ：解析平台数据包
+ * 输入  ：plat_report_t,平台信息结构体
+ * 返回  : 
+ *       ：SUCCESS,成功；ERROR,失败
+*********************************************************************************************************
+*/
+ErrorStatus app_palt_Reportparse(plat_report_t * report_t)
+{
+	uint8_t reg_status;
+	uint16_t len;
+	
+	reg_status = getIR();               	/*读取中断标志寄存器*/
+	setIR(reg_status);                  	/*回写清除中断标志*/
+	reg_status = getSIR();              	/*读取端口中断标志寄存器*/	
+	setSIR(reg_status);										/*回写清除端口中断标志寄存器*/
+	
+	if((reg_status & 0x01) == 0x01)     	/*Socket0事件*/ 
+	{
+		reg_status = getSn_IR(SOCK_TCPS); 	/*读取Socket0中断标志寄存器*/
+		setSn_IR(SOCK_TCPS,reg_status);   	/*回写清除中断*/
+		if(reg_status & Sn_IR_RECV)         /*Socket接收到数据,可以启动S_rx_process()函数*/
+		{	
+			len = getSn_RX_RSR(0);						/*读取W5500接收缓存区数据大小*/
+			if(0 == len) 
+			{
+				return ERROR;
+			}
+			/*获取W5500接收缓存区数据*/
+			report_t->evt_id = MQTTPacket_read(report_t->payload_data, PLAT_MAX_DATA_LEN , transport_getdata);
+			return SUCCESS;
+		}
+	}
+	return ERROR;
+}
+
